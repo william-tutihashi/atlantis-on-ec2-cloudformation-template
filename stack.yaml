@@ -1,0 +1,231 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Atlantis image builder
+
+Parameters:
+  S3LogsBucketName:
+    Type: String
+    Description: The bucket to put the build logs
+  AmazonLinux2AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: The Amazon Linux 2 AMI id for the region
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where the image will be built
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet where the image will be built
+
+Resources:
+  Image:
+    Type: AWS::ImageBuilder::Image
+    Properties:
+      ImageRecipeArn: !Ref ImageRecipe
+      DistributionConfigurationArn: !Ref DistributionConfiguration
+      InfrastructureConfigurationArn: !Ref InfrastructureConfiguration
+
+  ImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: atlantis-ami-builder-recipe
+      Description: atlantis-ami-builder-recipe
+      ParentImage: !Ref AmazonLinux2AmiId
+      Version: "1.0.0"
+      Components:
+        - ComponentArn: !Ref ImageRecipeComponent
+
+  ImageRecipeComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: atlantis-ami-builder-recipe
+      Description: Atlantis AMI builder recipe component
+      Platform: Linux
+      Version: "1.0.0"
+      Data: |
+        name: atlantis-ami-builder-recipe-setup
+        description: atlantis ami builder recipe setup component
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: setup
+                action: ExecuteBash
+                inputs:
+                  commands:
+                    - wget https://github.com/runatlantis/atlantis/releases/download/v0.19.2/atlantis_linux_amd64.zip -P /tmp/atlantis/
+                    - unzip /tmp/atlantis/atlantis_linux_amd64.zip -d /tmp/atlantis/
+                    - sudo mv /tmp/atlantis/atlantis /usr/bin
+
+                    - wget https://github.com/gruntwork-io/terragrunt/releases/download/v0.37.0/terragrunt_linux_amd64 -P /tmp/terragrunt/
+                    - sudo mv /tmp/terragrunt/terragrunt_linux_amd64 /usr/bin/terragrunt
+                    - sudo chmod 755 /usr/bin/terragrunt
+
+                    - sudo yum install -y yum-utils
+                    - sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+                    - sudo yum -y install terraform
+
+                    - sudo yum update -y
+                    - sudo yum install git -y
+
+                    - sudo setcap CAP_NET_BIND_SERVICE=+eip /usr/bin/atlantis
+
+                    - touch ~/run-atlantis
+                    - chmod +x ~/run-atlantis
+                    - echo '#!/usr/bin/env bash' >> ~/run-atlantis
+                    - echo 'set -xe' >> ~/run-atlantis
+                    - echo 'export ATLANTIS_REPO_ALLOWLIST="REPO_PLACEHOLDER"' >> ~/run-atlantis
+                    - echo 'export ATLANTIS_GH_USER="USER_PLACEHOLDER"' >> ~/run-atlantis
+                    - echo 'export ATLANTIS_GH_TOKEN="TOKEN_PLACEHOLDER"' >> ~/run-atlantis
+                    - echo 'export ATLANTIS_GH_WEBHOOK_SECRET="WH_SECRET_PLACEHOLDER"' >> ~/run-atlantis
+                    - echo 'export ATLANTIS_AUTOMERGE="true"' >> ~/run-atlantis
+                    - echo 'export ATLANTIS_CHECKOUT_STRATEGY="merge"' >> ~/run-atlantis
+                    - echo 'export ATLANTIS_ENABLE_DIFF_MARKDOWN_FORMAT="true"' >> ~/run-atlantis
+                    - echo 'export ATLANTIS_PORT="80"' >> ~/run-atlantis
+                    - echo 'export ATLANTIS_WRITE_GIT_CREDS="true"' >> ~/run-atlantis
+                    - echo 'export ATLANTIS_REPO_CONFIG="/etc/atlantis/repos.yaml"' >> ~/run-atlantis
+                    - echo 'export TF_CLI_ARGS="-no-color"' >> ~/run-atlantis
+                    - echo /usr/bin/atlantis server >> ~/run-atlantis
+                    - sudo mv ~/run-atlantis /usr/bin/run-atlantis
+
+                    - touch ~/repos.yaml
+                    - echo $'repos:' >> ~/repos.yaml
+                    - "echo $'- id: \"/.*/\"' >> ~/repos.yaml"
+                    - "echo $'  workflow: terragrunt' >> ~/repos.yaml"
+                    - echo $'  apply_requirements:' >> ~/repos.yaml
+                    - echo $'  - mergeable' >> ~/repos.yaml
+                    - echo $'  - approved' >> ~/repos.yaml
+                    - echo $'workflows:' >> ~/repos.yaml
+                    - echo $'  terragrunt:' >> ~/repos.yaml
+                    - echo $'    plan:' >> ~/repos.yaml
+                    - echo $'      steps:' >> ~/repos.yaml
+                    - echo $'      - env:' >> ~/repos.yaml
+                    - "echo $'          name: TERRAGRUNT_TFPATH' >> ~/repos.yaml"
+                    - "echo $'          command: \\'echo \"terraform\"\\'' >> ~/repos.yaml"
+                    - "echo $'      - run: terragrunt plan --terragrunt-non-interactive -out=$PLANFILE' >> ~/repos.yaml"
+                    - "echo $'      - run: terragrunt show --terragrunt-non-interactive -json $PLANFILE > $SHOWFILE' >> ~/repos.yaml"
+                    - echo $'    apply:' >> ~/repos.yaml
+                    - echo $'      steps:' >> ~/repos.yaml
+                    - echo $'      - env:' >> ~/repos.yaml
+                    - "echo $'          name: TERRAGRUNT_TFPATH' >> ~/repos.yaml"
+                    - "echo $'          command: \\'echo \"terraform\"\\'' >> ~/repos.yaml"
+                    - "echo $'      - run: terragrunt apply --terragrunt-non-interactive $PLANFILE' >> ~/repos.yaml"
+                    - sudo mkdir /etc/atlantis
+                    - sudo mv ~/repos.yaml /etc/atlantis/repos.yaml
+
+                    - sudo touch /etc/systemd/system/atlantis.service
+                    - printf '[Unit]\nDescription=atlantis service\nAfter=network.target\n\n[Service]\nType=simple\nRestart=always\nRestartSec=1\nUser=ec2-user\nExecStart=/usr/bin/run-atlantis server\nStartLimitIntervalSec=0\n\n[Install]\nWantedBy=multi-user.target' | sudo tee /etc/systemd/system/atlantis.service
+
+  DistributionConfiguration:
+    Type: AWS::ImageBuilder::DistributionConfiguration
+    Properties:
+      Name: atlantis-ami-builder-distr
+      Description: distribution config for atlantis-ami-builder
+      Distributions:
+        - Region: !Ref AWS::Region
+          AmiDistributionConfiguration:
+            Name: atlantis-ami-{{imagebuilder:buildDate}}
+            Description: atlantis ami
+            AmiTags:
+              Name: atlantis-ami
+
+  InfrastructureConfiguration:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties:
+      Name: atlantis-ami-builder-infra
+      Description: infra config for atlantis-ami-builder
+      InstanceProfileName: !Ref InstanceProfile
+      InstanceTypes:
+        - t3.medium
+        - t3.small
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      SubnetId: !Ref SubnetId
+      TerminateInstanceOnFailure: true
+      Logging:
+        S3Logs:
+          S3BucketName: !Ref S3LogsBucketName
+          S3KeyPrefix: atlantis-image-builder/
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow all outbound traffic
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - CidrIpv6: ::/0
+          FromPort: 0
+          ToPort: 0
+          IpProtocol: "-1"
+        - CidrIp: 0.0.0.0/0
+          FromPort: 0
+          ToPort: 0
+          IpProtocol: "-1"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: atlantis-ami-builder
+      Roles:
+        - !Ref IamRole
+
+  IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: atlantis-ami-builder
+      Description: Atlantis EC2 Image Builder
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: atlantis-ami-builder
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:DescribeAssociation
+                  - ssm:GetDeployablePatchSnapshotForInstance
+                  - ssm:GetDocument
+                  - ssm:DescribeDocument
+                  - ssm:GetManifest
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:ListAssociations
+                  - ssm:ListInstanceAssociations
+                  - ssm:PutInventory
+                  - ssm:PutComplianceItems
+                  - ssm:PutConfigurePackageResult
+                  - ssm:UpdateAssociationStatus
+                  - ssm:UpdateInstanceAssociationStatus
+                  - ssm:UpdateInstanceInformation
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                  - ec2messages:AcknowledgeMessage
+                  - ec2messages:DeleteMessage
+                  - ec2messages:FailMessage
+                  - ec2messages:GetEndpoint
+                  - ec2messages:GetMessages
+                  - ec2messages:SendReply
+                  - imagebuilder:GetComponent
+                  - s3:List
+                  - s3:GetObject
+                  - kms:Decrypt
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub arn:aws:s3:::${S3LogsBucketName}/atlantis-image-builder/*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:log-group:/aws/imagebuilder/*
